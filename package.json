@@ -1,0 +1,22 @@
+{
+  "name": "giai-cau-long",
+  "version": "1.0.0",
+  "description": "Website Quản Lý Giải Đấu Cầu Lông (Smash Open Cup)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host --open",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "badminton",
+    "tournament",
+    "cau-long",
+    "giai-dau"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
+}
