@@ -2059,7 +2059,7 @@
 
         function openCreateAthleteModal() {
             if (!CurrentUser || CurrentUser.role !== 'admin') return;
-            openModal('🏃 Thêm Vận Động Viên & Gán Nội Dung Thi Đấu (Import CSV)', `
+            openModal('🏃 Thêm Vận Động Viên & Gán Nội Dung Thi Đấu (Import CSV / Excel)', `
                 <div class="space-y-4">
                     <div>
                         <label class="block text-xs font-bold uppercase text-neutral-400 mb-1">Chọn nội dung thi đấu cho danh sách import</label>
@@ -2068,9 +2068,21 @@
                             ${DB.categories.map(c => `<option value="${c.id}">${escapeHtml(c.name)} (${c.mode === 'doubles' ? 'Đánh Đôi' : 'Đánh Đơn'})</option>`).join('')}
                         </select>
                     </div>
-                    <div class="p-3 bg-neutral-950 rounded-xl border border-dashed border-neutral-700">
-                        <label for="excelFileInput" class="cursor-pointer bg-red-600 hover:bg-red-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold inline-block">📁 Chọn file CSV (Hỗ trợ lọc trùng SĐT, MSSV, Email, CLB & Đôi hàng ngang)</label>
-                        <input type="file" id="excelFileInput" accept=".csv" class="hidden" onchange="handleAthletesImport(event)">
+                    <div class="p-3.5 bg-neutral-950 rounded-xl border border-dashed border-neutral-700 space-y-2">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <label for="excelFileInput" class="cursor-pointer bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-xl text-xs font-bold inline-block">📁 Chọn file CSV / Excel</label>
+                            <button type="button" onclick="downloadAthleteImportTemplate()" class="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-bold">📥 Tải file CSV mẫu</button>
+                            <input type="file" id="excelFileInput" accept=".csv,.xlsx,.xls" class="hidden" onchange="handleAthletesImport(event)">
+                        </div>
+                        <p class="text-[11px] text-neutral-400 leading-relaxed">
+                            💡 Hỗ trợ cột: <strong>Họ tên, MSSV, SĐT, CLB, Email</strong> (hoặc Đôi hàng ngang).<br>
+                            ⚡ Lọc trùng thông minh theo <strong>Tên + CLB, MSSV và SĐT</strong>.
+                        </p>
+                    </div>
+                    <div class="relative flex py-1 items-center">
+                        <div class="flex-grow border-t border-neutral-800"></div>
+                        <span class="flex-shrink mx-3 text-[11px] uppercase font-bold text-neutral-500">Hoặc thêm thủ công 1 VĐV</span>
+                        <div class="flex-grow border-t border-neutral-800"></div>
                     </div>
                     <form onsubmit="handleCreateAthleteSubmit(event)" class="space-y-3">
                         <div>
@@ -2103,98 +2115,265 @@
             `);
         }
 
-        function handleAthletesImport(event) {
+        function downloadAthleteImportTemplate() {
+            const csv = [
+                'Họ và tên,MSSV,Số điện thoại,CLB / Đơn vị,Email',
+                'Nguyễn Văn A,20210001,0901234567,CLB Cầu Lông BK,nguyenvana@gmail.com',
+                'Trần Thị B,20210002,0912345678,CLB Cầu Lông NT,tranthib@gmail.com',
+                'Lê Văn C,20220003,0987654321,Tự do,levanc@gmail.com'
+            ].join('\r\n');
+            const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'mau_import_vdv_smash_open_cup.csv'; a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function checkAthleteDuplicate(candidate, list) {
+            const candName = String(candidate.name || '').trim();
+            const candNormName = normalizeSearchText(candName);
+            const candPhone = String(candidate.phone || '').replace(/[^0-9]/g, '');
+            const candMssv = String(candidate.mssv || '').trim().toLowerCase();
+            const candEmail = String(candidate.email || '').trim().toLowerCase();
+            const candClub = String(candidate.club || '').trim();
+            const candClubNorm = normalizeSearchText(candClub);
+            const isCandClubDefault = !candClubNorm || candClubNorm === 'tu do';
+
+            for (const existing of list) {
+                const exName = String(existing.name || '').trim();
+                const exNormName = normalizeSearchText(exName);
+                const exPhone = String(existing.phone || '').replace(/[^0-9]/g, '');
+                const exMssv = String(existing.mssv || '').trim().toLowerCase();
+                const exEmail = String(existing.email || '').trim().toLowerCase();
+                const exClub = String(existing.club || '').trim();
+                const exClubNorm = normalizeSearchText(exClub);
+                const isExClubDefault = !exClubNorm || exClubNorm === 'tu do';
+
+                // 1. Lọc trùng MSSV (nếu cả 2 đều có MSSV)
+                if (candMssv && exMssv && candMssv === exMssv) {
+                    return { isDuplicate: true, reason: `Trùng MSSV (${existing.mssv}) với VĐV "${existing.name}"`, match: existing };
+                }
+
+                // 2. Lọc trùng SĐT (nếu cả 2 đều có SĐT và độ dài >= 9 số)
+                if (candPhone && exPhone && candPhone.length >= 9 && candPhone === exPhone) {
+                    return { isDuplicate: true, reason: `Trùng SĐT (${existing.phone}) với VĐV "${existing.name}"`, match: existing };
+                }
+
+                // 3. Lọc trùng Email (nếu cả 2 đều có email)
+                if (candEmail && exEmail && candEmail === exEmail) {
+                    return { isDuplicate: true, reason: `Trùng Email (${existing.email}) với VĐV "${existing.name}"`, match: existing };
+                }
+
+                // 4. Lọc trùng Tên: sau khi lọc trùng tên thì kiểm tra lọc tiếp MSSV, SĐT và CLB họ đang ở
+                if (candNormName && exNormName && candNormName === exNormName) {
+                    // Nếu cùng CLB (và không phải đều là Tự do) -> Coi là cùng 1 người bị trùng
+                    if (!isCandClubDefault && !isExClubDefault && candClubNorm === exClubNorm) {
+                        return { isDuplicate: true, reason: `Trùng Tên & cùng CLB "${existing.club}" với VĐV "${existing.name}"`, match: existing };
+                    }
+
+                    // Nếu có thông tin phân biệt (khác MSSV, hoặc khác SĐT, hoặc khác CLB rõ rệt)
+                    const hasDifferentMssv = candMssv && exMssv && candMssv !== exMssv;
+                    const hasDifferentPhone = candPhone && exPhone && candPhone.length >= 9 && exPhone.length >= 9 && candPhone !== exPhone;
+                    const hasDifferentClub = !isCandClubDefault && !isExClubDefault && candClubNorm !== exClubNorm;
+
+                    if (hasDifferentMssv || hasDifferentPhone || hasDifferentClub) {
+                        // 2 người khác nhau cùng họ tên nhưng khác MSSV/SĐT/CLB -> Không coi là trùng lặp!
+                        continue;
+                    }
+
+                    // Nếu không có thông tin đối chứng nào khác biệt (đều không có MSSV, không có SĐT, CLB đều Tự do) -> Trùng tên
+                    return { isDuplicate: true, reason: `Trùng họ tên với VĐV "${existing.name}"`, match: existing };
+                }
+            }
+
+            return { isDuplicate: false };
+        }
+
+        async function handleAthletesImport(event) {
             if (!CurrentUser || CurrentUser.role !== 'admin') { showToast('Chỉ Admin mới được import VĐV.', 'error'); return; }
-            const file = event.target.files[0];
+            const file = event.target.files?.[0];
             if (!file) return;
 
             const catIdEl = document.getElementById('import-cat-id');
             const targetCategoryId = catIdEl ? catIdEl.value : '';
 
-            const reader = new FileReader();
-            reader.onload = async function(e) {
-                const text = String(e.target.result || '').replace(/^\uFEFF/, '');
-                const lines = text.split(/\r?\n/);
-                let count = 0;
+            let count = 0;
+            let dupCount = 0;
+            const dupReasons = [];
 
-                function parseCSVLine(line) {
-                    const result = [];
-                    let value = '';
+            function parseCSVText(text) {
+                const lines = text.split(/\r?\n/);
+                const result = [];
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    const cols = [];
+                    let val = '';
                     let inQuotes = false;
-                    for (let i = 0; i < line.length; i++) {
-                        const ch = line[i];
+                    for (let i = 0; i < trimmed.length; i++) {
+                        const ch = trimmed[i];
                         if (ch === '"') {
-                            if (inQuotes && line[i + 1] === '"') { value += '"'; i++; }
+                            if (inQuotes && trimmed[i + 1] === '"') { val += '"'; i++; }
                             else inQuotes = !inQuotes;
                         } else if (ch === ',' && !inQuotes) {
-                            result.push(value.trim());
-                            value = '';
+                            cols.push(val.trim());
+                            val = '';
                         } else {
-                            value += ch;
+                            val += ch;
                         }
                     }
-                    result.push(value.trim());
-                    return result;
+                    cols.push(val.trim());
+                    result.push(cols);
+                }
+                return result;
+            }
+
+            try {
+                let parsedRows = [];
+
+                if (window.XLSX) {
+                    try {
+                        const buffer = await file.arrayBuffer();
+                        const workbook = window.XLSX.read(buffer, { type: 'array' });
+                        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                        parsedRows = window.XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+                    } catch (e) {
+                        console.warn('Đọc bằng XLSX không thành công, chuyển sang parser văn bản CSV:', e);
+                    }
                 }
 
-                for (let index = 0; index < lines.length; index++) {
-                    const line = lines[index].trim();
-                    if (!line || index === 0) continue;
-
-                    const cols = parseCSVLine(line);
-                    if (cols.length < 3) continue;
-
-                    const mainName = cols[2] || cols[1];
-                    const mainPhone = cols[3] || '';
-                    const mainClub = cols[4] || 'Tự do';
-                    const mainMssv = cols[5] || '';
-                    const mainEmail = cols[6] || '';
-
-                    const partnerName = cols.length >= 15 ? cols[10] : '';
-                    const partnerPhone = cols.length >= 15 ? cols[11] : '';
-                    const partnerClub = cols.length >= 15 ? (cols[12] || 'Tự do') : '';
-                    const partnerMssv = cols.length >= 15 ? cols[13] : '';
-                    const partnerEmail = cols.length >= 15 ? cols[14] : '';
-
-                    const processAth = (name, phone, mssv, email, club) => {
-                        if (!name || name.length < 2) return;
-                        const lower = name.toLowerCase();
-                        if (lower.includes('đôi') || lower.includes('bảng') || lower.includes('đơn')) return;
-                        if (/^\d+$/.test(name)) return;
-
-                        const exists = DB.athletes.some(a => {
-                            if (phone && a.phone && a.phone.trim() === phone.trim()) return true;
-                            if (mssv && a.mssv && a.mssv.trim().toLowerCase() === mssv.trim().toLowerCase()) return true;
-                            if (email && a.email && a.email.trim().toLowerCase() === email.trim().toLowerCase()) return true;
-                            if (a.name.toLowerCase() === name.toLowerCase() && (a.club || '').toLowerCase() === (club || '').toLowerCase()) return true;
-                            return false;
-                        });
-
-                        if (!exists) {
-                            const athlete = {
-                                id: `ath_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
-                                name, club: club || 'Tự do', phone, mssv, email, categoryId: targetCategoryId || ''
-                            };
-                            DB.athletes.push(athlete);
-                            queueAthleteCloudOperation('set', athlete);
-                            count++;
+                if (!parsedRows || parsedRows.length === 0) {
+                    const text = (await file.text()).replace(/^\uFEFF/, '');
+                    const matrix = parseCSVText(text);
+                    if (matrix.length > 1) {
+                        const headers = matrix[0];
+                        for (let i = 1; i < matrix.length; i++) {
+                            const rowObj = {};
+                            headers.forEach((h, idx) => { rowObj[h || `col_${idx}`] = matrix[i][idx] || ''; });
+                            rowObj.__rawCols = matrix[i];
+                            parsedRows.push(rowObj);
                         }
+                    } else if (matrix.length === 1) {
+                        parsedRows.push({ __rawCols: matrix[0] });
+                    }
+                }
+
+                if (!parsedRows.length) throw new Error('File không có dòng dữ liệu hợp lệ để import.');
+
+                const normalizeKey = key => normalizeSearchText(key).replace(/[^a-z0-9]/g, '');
+                const getVal = (row, aliases) => {
+                    const keys = Object.keys(row);
+                    const wanted = aliases.map(normalizeKey);
+                    const found = keys.find(k => wanted.includes(normalizeKey(k)));
+                    return found ? String(row[found] || '').trim() : '';
+                };
+
+                const nameAliases = ['hoten', 'hovaten', 'ten', 'tenvdv', 'athlete', 'name', 'vdv', 'fullname', 'player', 'vandongvien'];
+                const phoneAliases = ['sdt', 'sodienthoai', 'dienthoai', 'phone', 'telephone', 'mobile', 'tel'];
+                const mssvAliases = ['mssv', 'masosinhvien', 'masv', 'masovdv', 'studentid', 'id'];
+                const clubAliases = ['clb', 'caulacbo', 'donvi', 'coquan', 'truong', 'khoa', 'club', 'team', 'unit'];
+                const emailAliases = ['email', 'thu', 'mail'];
+
+                // Partner (cho trường hợp đôi hàng ngang)
+                const pNameAliases = ['hoten2', 'hovaten2', 'ten2', 'vdv2', 'partner', 'dongdoi', 'vdvphu', 'player2'];
+                const pPhoneAliases = ['sdt2', 'sodienthoai2', 'phone2', 'mobile2'];
+                const pMssvAliases = ['mssv2', 'masosinhvien2', 'masv2', 'studentid2'];
+                const pClubAliases = ['clb2', 'caulacbo2', 'donvi2', 'club2'];
+                const pEmailAliases = ['email2', 'mail2'];
+
+                const processAth = (name, phone, mssv, email, club) => {
+                    const cleanName = String(name || '').trim();
+                    if (!cleanName || cleanName.length < 2) return;
+                    const lower = cleanName.toLowerCase();
+                    if (lower.includes('đôi') || lower.includes('bảng') || lower.includes('đơn')) return;
+                    if (/^\d+$/.test(cleanName)) return;
+
+                    const candidate = {
+                        name: cleanName,
+                        phone: String(phone || '').trim(),
+                        mssv: String(mssv || '').trim(),
+                        email: String(email || '').trim(),
+                        club: String(club || '').trim() || 'Tự do',
+                        categoryId: targetCategoryId || ''
                     };
 
-                    processAth(mainName, mainPhone, mainMssv, mainEmail, mainClub);
-                    if (partnerName) {
-                        processAth(partnerName, partnerPhone, partnerMssv, partnerEmail, partnerClub);
+                    const dupCheck = checkAthleteDuplicate(candidate, DB.athletes);
+                    if (dupCheck.isDuplicate) {
+                        dupCount++;
+                        dupReasons.push(`${candidate.name}: ${dupCheck.reason}`);
+                        return;
                     }
+
+                    const athlete = {
+                        id: `ath_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+                        ...candidate
+                    };
+                    DB.athletes.push(athlete);
+                    queueAthleteCloudOperation('set', athlete);
+                    count++;
+                };
+
+                for (const row of parsedRows) {
+                    let mainName = getVal(row, nameAliases);
+                    let mainPhone = getVal(row, phoneAliases);
+                    let mainMssv = getVal(row, mssvAliases);
+                    let mainClub = getVal(row, clubAliases);
+                    let mainEmail = getVal(row, emailAliases);
+
+                    let partnerName = getVal(row, pNameAliases);
+                    let partnerPhone = getVal(row, pPhoneAliases);
+                    let partnerMssv = getVal(row, pMssvAliases);
+                    let partnerClub = getVal(row, pClubAliases);
+                    let partnerEmail = getVal(row, pEmailAliases);
+
+                    // Fallback theo vị trí cột nếu file không có header khớp alias
+                    const rawCols = row.__rawCols || Object.values(row);
+                    if (!mainName && rawCols.length >= 2) {
+                        if (/^\d+$/.test(String(rawCols[0]).trim())) {
+                            mainName = rawCols[1] || '';
+                            mainMssv = rawCols[2] || '';
+                            mainPhone = rawCols[3] || '';
+                            mainClub = rawCols[4] || 'Tự do';
+                        } else {
+                            mainName = rawCols[0] || '';
+                            mainMssv = rawCols[1] || '';
+                            mainPhone = rawCols[2] || '';
+                            mainClub = rawCols[3] || 'Tự do';
+                        }
+                    }
+
+                    // Tương thích format form 15 cột cũ (nếu có)
+                    if (rawCols.length >= 15 && !partnerName) {
+                        partnerName = rawCols[10] || '';
+                        partnerPhone = rawCols[11] || '';
+                        partnerClub = rawCols[12] || 'Tự do';
+                        partnerMssv = rawCols[13] || '';
+                        partnerEmail = rawCols[14] || '';
+                    }
+
+                    if (mainName) processAth(mainName, mainPhone, mainMssv, mainEmail, mainClub);
+                    if (partnerName) processAth(partnerName, partnerPhone, partnerMssv, partnerEmail, partnerClub);
                 }
 
                 broadcastLocalUpdate();
                 const synced = await flushPendingAthleteChanges({ silent: true });
-                if (count > 0 && !synced) showToast(`Đã import ${count} VĐV trên thiết bị; Cloud sẽ tự đồng bộ khi kết nối lại.`, 'warning');
-                else showToast(`Đã import thành công ${count} VĐV mới${count ? ' và đồng bộ Cloud' : ''} (đã lọc trùng tự động)!`, 'success');
+
+                if (count > 0) {
+                    const dupText = dupCount > 0 ? ` (Đã lọc bỏ ${dupCount} VĐV trùng Tên, MSSV, SĐT hoặc CLB)` : '';
+                    showToast(`Đã import thành công ${count} VĐV mới${dupText}!`, 'success');
+                } else if (dupCount > 0) {
+                    showToast(`Tất cả ${dupCount} VĐV trong file đều đã tồn tại (trùng Tên, MSSV, SĐT hoặc CLB).`, 'warning');
+                } else {
+                    showToast('Không tìm thấy VĐV hợp lệ trong file.', 'info');
+                }
+
                 closeModal();
                 renderApp();
-            };
-            reader.readAsText(file);
+            } catch (err) {
+                console.error('Import VĐV thất bại:', err);
+                showToast(err.message || 'Lỗi khi đọc file CSV / Excel.', 'error');
+            } finally {
+                event.target.value = '';
+            }
         }
 
         async function handleCreateAthleteSubmit(e) {
@@ -2207,15 +2386,9 @@
             const club = document.getElementById('ath-club').value.trim() || 'Tự do';
             if (!name) return;
 
-            const exists = DB.athletes.some(a => {
-                if (phone && a.phone && a.phone === phone) return true;
-                if (mssv && a.mssv && a.mssv.toLowerCase() === mssv.toLowerCase()) return true;
-                if (email && a.email && a.email.toLowerCase() === email.toLowerCase()) return true;
-                return a.name.toLowerCase() === name.toLowerCase() && (a.club || '').toLowerCase() === club.toLowerCase();
-            });
-
-            if (exists) {
-                showToast('Vận động viên này đã tồn tại trong hệ thống (trùng SĐT, MSSV, Email hoặc Tên+CLB)!', 'warning');
+            const duplicateCheck = checkAthleteDuplicate({ name, phone, mssv, email, club }, DB.athletes);
+            if (duplicateCheck.isDuplicate) {
+                showToast(`Vận động viên này đã tồn tại trong hệ thống (${duplicateCheck.reason})!`, 'warning');
                 return;
             }
 
@@ -2728,7 +2901,7 @@
             openAssignMatchModal, openAssignMatchModalForCategory, handleAssignMatchToCourt, unassignMatchFromCourt, addPoint, undoPoint,
             manualSetServer, chooseDoublesServer, forceEndSet, forceEndMatch,
             openCreateGroupModal, handleGroupCategoryChange, handleTeamCountChange, handleCreateGroupSubmit, filterGroupAthletes, chooseGroupAthlete, importGroupsFromExcel, downloadGroupImportTemplate, generatePlayoffBracket, updateQualifiersPerGroup, requestDeletePlayoffBracket, executeDeletePlayoffBracket, deleteGroup,
-            openCreateAthleteModal, handleAthletesImport, handleCreateAthleteSubmit, deleteAthlete,
+            openCreateAthleteModal, handleAthletesImport, handleCreateAthleteSubmit, deleteAthlete, downloadAthleteImportTemplate,
             confirmDeleteAllAthletes, executeDeleteAllAthletes, confirmClearAllMatches, executeClearAllMatches, openCreateCategoryModal,
             handleCreateCategorySubmit, deleteCategory, openCreateRefereeModal, handleCreateRefereeSubmit, deleteUser,
             openCloudSettingsModal, handleConnectCloudSubmit, retryCloudConnection
