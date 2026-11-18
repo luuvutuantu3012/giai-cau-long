@@ -1474,7 +1474,7 @@
         }
 
         function normalizeSearchText(value) {
-            return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+            return String(value || '').replace(/đ/g, 'd').replace(/Đ/g, 'd').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
         }
 
         function renderGroupAthletePicker(teamIndex, playerIndex, label) {
@@ -2200,6 +2200,25 @@
             let dupCount = 0;
             const dupReasons = [];
 
+            function isPhoneNumber(val) {
+                if (!val) return false;
+                const s = String(val).replace(/[\s\.\-\(\)]/g, '');
+                return /^(0|\+84)[0-9]{8,11}$/.test(s) || (/^[0-9]{9,12}$/.test(s) && !isDateOrTimestamp(val));
+            }
+
+            function isValidPersonName(val) {
+                if (!val) return false;
+                const s = String(val).trim();
+                if (s.length < 2 || s.length > 70) return false;
+                if (isDateOrTimestamp(s)) return false;
+                if (isPhoneNumber(s)) return false;
+                if (/@/.test(s)) return false;
+                if (/^\d+$/.test(s)) return false;
+                const lower = s.toLowerCase();
+                if (lower.includes('đôi') || lower.includes('bảng') || lower.includes('đơn') || lower.includes('dấu thời gian') || lower.includes('timestamp')) return false;
+                return true;
+            }
+
             function parseCSVText(text) {
                 const lines = text.split(/\r?\n/);
                 const result = [];
@@ -2228,68 +2247,98 @@
             }
 
             try {
-                let parsedRows = [];
+                let matrix = [];
+                const fileName = (file.name || '').toLowerCase();
+                const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls');
 
-                if (window.XLSX) {
-                    try {
-                        const buffer = await file.arrayBuffer();
-                        const workbook = window.XLSX.read(buffer, { type: 'array' });
-                        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-                        parsedRows = window.XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
-                    } catch (e) {
-                        console.warn('Đọc bằng XLSX không thành công, chuyển sang parser văn bản CSV:', e);
-                    }
-                }
-
-                if (!parsedRows || parsedRows.length === 0) {
+                if (isExcel && window.XLSX) {
+                    const buffer = await file.arrayBuffer();
+                    const workbook = window.XLSX.read(buffer, { type: 'array' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    matrix = window.XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+                } else {
+                    // CSV: Luôn đọc dưới dạng UTF-8 Text để không bao giờ bị lỗi font tiếng Việt!
                     const text = (await file.text()).replace(/^\uFEFF/, '');
-                    const matrix = parseCSVText(text);
-                    if (matrix.length > 1) {
-                        const headers = matrix[0];
-                        for (let i = 1; i < matrix.length; i++) {
-                            const rowObj = {};
-                            headers.forEach((h, idx) => { rowObj[h || `col_${idx}`] = matrix[i][idx] || ''; });
-                            rowObj.__rawCols = matrix[i];
-                            parsedRows.push(rowObj);
+                    if (window.XLSX) {
+                        try {
+                            const workbook = window.XLSX.read(text, { type: 'string' });
+                            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                            matrix = window.XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+                        } catch {
+                            matrix = parseCSVText(text);
                         }
-                    } else if (matrix.length === 1) {
-                        parsedRows.push({ __rawCols: matrix[0] });
+                    } else {
+                        matrix = parseCSVText(text);
                     }
                 }
 
-                if (!parsedRows.length) throw new Error('File không có dòng dữ liệu hợp lệ để import.');
+                if (!matrix || matrix.length === 0) throw new Error('File không có dữ liệu để import.');
 
                 const normalizeKey = key => normalizeSearchText(key).replace(/[^a-z0-9]/g, '');
-                const getVal = (row, aliases) => {
-                    const keys = Object.keys(row);
-                    const wanted = aliases.map(normalizeKey);
-                    const found = keys.find(k => wanted.includes(normalizeKey(k)));
-                    return found ? String(row[found] || '').trim() : '';
-                };
 
-                const nameAliases = ['hoten', 'hovaten', 'ten', 'tenvdv', 'athlete', 'name', 'vdv', 'fullname', 'player', 'vandongvien'];
-                const phoneAliases = ['sdt', 'sodienthoai', 'dienthoai', 'phone', 'telephone', 'mobile', 'tel'];
-                const mssvAliases = ['mssv', 'masosinhvien', 'masv', 'masovdv', 'studentid', 'id'];
-                const clubAliases = ['clb', 'caulacbo', 'donvi', 'coquan', 'truong', 'khoa', 'club', 'team', 'unit'];
-                const emailAliases = ['email', 'thu', 'mail'];
+                // Phân tích hàng tiêu đề (Header row)
+                const headerRow = (matrix[0] || []).map(c => String(c || '').trim());
+                let nameCol = -1, phoneCol = -1, mssvCol = -1, clubCol = -1, emailCol = -1;
+                let pNameCol = -1, pPhoneCol = -1, pMssvCol = -1, pClubCol = -1, pEmailCol = -1;
 
-                // Partner (cho trường hợp đôi hàng ngang)
-                const pNameAliases = ['hoten2', 'hovaten2', 'ten2', 'vdv2', 'partner', 'dongdoi', 'vdvphu', 'player2'];
-                const pPhoneAliases = ['sdt2', 'sodienthoai2', 'phone2', 'mobile2'];
-                const pMssvAliases = ['mssv2', 'masosinhvien2', 'masv2', 'studentid2'];
-                const pClubAliases = ['clb2', 'caulacbo2', 'donvi2', 'club2'];
-                const pEmailAliases = ['email2', 'mail2'];
+                headerRow.forEach((h, idx) => {
+                    const key = normalizeKey(h);
+                    if (!key) return;
+                    const isP = key.includes('2') || key.includes('partner') || key.includes('dongdoi') || key.includes('phu');
+
+                    if (key.includes('hoten') || key.includes('hovaten') || key.includes('tenvdv') || (key.includes('ten') && !key.includes('dauthoigian') && !key.includes('doidau') && !key.includes('tencau') && !key.includes('clb')) || key.includes('athlete') || key.includes('fullname') || key.includes('player')) {
+                        if (isP && pNameCol === -1) pNameCol = idx;
+                        else if (!isP && nameCol === -1) nameCol = idx;
+                    } else if (key.includes('sdt') || key.includes('sodienthoai') || key.includes('dienthoai') || key.includes('phone') || key.includes('mobile') || key.includes('tel')) {
+                        if (isP && pPhoneCol === -1) pPhoneCol = idx;
+                        else if (!isP && phoneCol === -1) phoneCol = idx;
+                    } else if (key.includes('mssv') || key.includes('masosinhvien') || key.includes('masv') || key.includes('masovdv') || key.includes('studentid')) {
+                        if (isP && pMssvCol === -1) pMssvCol = idx;
+                        else if (!isP && mssvCol === -1) mssvCol = idx;
+                    } else if (key.includes('clb') || key.includes('caulacbo') || key.includes('donvi') || key.includes('coquan') || key.includes('truong') || key.includes('khoa') || key.includes('club') || key.includes('team') || key.includes('lop')) {
+                        if (isP && pClubCol === -1) pClubCol = idx;
+                        else if (!isP && clubCol === -1) clubCol = idx;
+                    } else if (key.includes('email') || key.includes('mail') || key.includes('thu')) {
+                        if (isP && pEmailCol === -1) pEmailCol = idx;
+                        else if (!isP && emailCol === -1) emailCol = idx;
+                    }
+                });
+
+                // Cấu hình vị trí cột theo format Google Form 15 cột nếu không tìm thấy qua header
+                if (nameCol === -1) {
+                    if (headerRow.length >= 15) {
+                        nameCol = 2; phoneCol = 3; clubCol = 4; mssvCol = 5; emailCol = 6;
+                        pNameCol = 10; pPhoneCol = 11; pClubCol = 12; pMssvCol = 13; pEmailCol = 14;
+                    } else if (headerRow.length >= 4) {
+                        const sample = matrix[1] || headerRow;
+                        let foundName = -1, foundPhone = -1;
+                        sample.forEach((val, idx) => {
+                            if (foundPhone === -1 && isPhoneNumber(val)) foundPhone = idx;
+                            else if (foundName === -1 && isValidPersonName(val)) foundName = idx;
+                        });
+                        nameCol = foundName !== -1 ? foundName : 1;
+                        phoneCol = foundPhone !== -1 ? foundPhone : 2;
+                        clubCol = headerRow.length > 3 ? 3 : -1;
+                        mssvCol = headerRow.length > 4 ? 4 : -1;
+                    } else {
+                        nameCol = 0;
+                        phoneCol = headerRow.length > 1 ? 1 : -1;
+                    }
+                }
+
+                let startRow = 1;
+                const row0Name = matrix[0]?.[nameCol];
+                if (isValidPersonName(row0Name) && !isDateOrTimestamp(matrix[0]?.[0])) {
+                    startRow = 0;
+                }
 
                 const processAth = (name, phone, mssv, email, club) => {
                     const cleanName = String(name || '').trim();
-                    if (!cleanName || cleanName.length < 2) return;
-                    const lower = cleanName.toLowerCase();
-                    if (lower.includes('đôi') || lower.includes('bảng') || lower.includes('đơn')) return;
-                    if (/^\d+$/.test(cleanName)) return;
+                    if (!isValidPersonName(cleanName)) return;
 
                     const candidate = {
                         name: cleanName,
-                        phone: String(phone || '').trim(),
+                        phone: String(phone || '').replace(/[\s\.\-\(\)]/g, '').trim(),
                         mssv: String(mssv || '').trim(),
                         email: String(email || '').trim(),
                         club: String(club || '').trim() || 'Tự do',
@@ -2304,7 +2353,7 @@
                     }
 
                     const athlete = {
-                        id: `ath_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+                        id: `ath_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
                         ...candidate
                     };
                     DB.athletes.push(athlete);
@@ -2312,42 +2361,38 @@
                     count++;
                 };
 
-                for (const row of parsedRows) {
-                    let mainName = getVal(row, nameAliases);
-                    let mainPhone = getVal(row, phoneAliases);
-                    let mainMssv = getVal(row, mssvAliases);
-                    let mainClub = getVal(row, clubAliases);
-                    let mainEmail = getVal(row, emailAliases);
+                for (let r = startRow; r < matrix.length; r++) {
+                    const row = matrix[r];
+                    if (!row || !row.length) continue;
 
-                    let partnerName = getVal(row, pNameAliases);
-                    let partnerPhone = getVal(row, pPhoneAliases);
-                    let partnerMssv = getVal(row, pMssvAliases);
-                    let partnerClub = getVal(row, pClubAliases);
-                    let partnerEmail = getVal(row, pEmailAliases);
+                    let mainName = nameCol !== -1 ? row[nameCol] : '';
+                    let mainPhone = phoneCol !== -1 ? row[phoneCol] : '';
+                    let mainMssv = mssvCol !== -1 ? row[mssvCol] : '';
+                    let mainClub = clubCol !== -1 ? row[clubCol] : '';
+                    let mainEmail = emailCol !== -1 ? row[emailCol] : '';
 
-                    // Fallback theo vị trí cột nếu file không có header khớp alias
-                    const rawCols = row.__rawCols || Object.values(row);
-                    if (!mainName && rawCols.length >= 2) {
-                        if (/^\d+$/.test(String(rawCols[0]).trim())) {
-                            mainName = rawCols[1] || '';
-                            mainMssv = rawCols[2] || '';
-                            mainPhone = rawCols[3] || '';
-                            mainClub = rawCols[4] || 'Tự do';
-                        } else {
-                            mainName = rawCols[0] || '';
-                            mainMssv = rawCols[1] || '';
-                            mainPhone = rawCols[2] || '';
-                            mainClub = rawCols[3] || 'Tự do';
-                        }
+                    let partnerName = pNameCol !== -1 ? row[pNameCol] : '';
+                    let partnerPhone = pPhoneCol !== -1 ? row[pPhoneCol] : '';
+                    let partnerMssv = pMssvCol !== -1 ? row[pMssvCol] : '';
+                    let partnerClub = pClubCol !== -1 ? row[pClubCol] : '';
+                    let partnerEmail = pEmailCol !== -1 ? row[pEmailCol] : '';
+
+                    if (row.length >= 15 && !partnerName && pNameCol === -1) {
+                        partnerName = row[10] || '';
+                        partnerPhone = row[11] || '';
+                        partnerClub = row[12] || 'Tự do';
+                        partnerMssv = row[13] || '';
+                        partnerEmail = row[14] || '';
                     }
 
-                    // Tương thích format form 15 cột cũ (nếu có)
-                    if (rawCols.length >= 15 && !partnerName) {
-                        partnerName = rawCols[10] || '';
-                        partnerPhone = rawCols[11] || '';
-                        partnerClub = rawCols[12] || 'Tự do';
-                        partnerMssv = rawCols[13] || '';
-                        partnerEmail = rawCols[14] || '';
+                    // Nếu mainName bị gán trúng ngày tháng thì quét tìm cột tên hợp lệ
+                    if (!isValidPersonName(mainName)) {
+                        for (let colIdx = 0; colIdx < Math.min(row.length, 6); colIdx++) {
+                            if (colIdx !== phoneCol && isValidPersonName(row[colIdx])) {
+                                mainName = row[colIdx];
+                                break;
+                            }
+                        }
                     }
 
                     if (mainName) processAth(mainName, mainPhone, mainMssv, mainEmail, mainClub);
@@ -2790,8 +2835,32 @@
             </div>`;
         }
 
+        function isDateOrTimestamp(val) {
+            if (!val) return false;
+            const s = String(val).trim();
+            return /^\d{1,4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,4}/.test(s) ||
+                   /^\d{1,2}[\/\-\.]\d{1,2}([\/\-\.]\d{2,4})?/.test(s) ||
+                   /^\d{1,2}:\d{2}(:\d{2})?/.test(s);
+        }
+
+        async function cleanCorruptAthletes() {
+            if (!CurrentUser || CurrentUser.role !== 'admin') return;
+            const isCorrupt = a => isDateOrTimestamp(a.name) || a.name.includes('Ã') || a.name.includes('Ä') || a.name.includes('»') || a.name.includes('Æ');
+            const corrupts = DB.athletes.filter(isCorrupt);
+            if (!corrupts.length) {
+                showToast('Không phát hiện VĐV nào bị lỗi tên hoặc lỗi font.', 'info');
+                return;
+            }
+            corrupts.forEach(a => queueAthleteCloudOperation('delete', a));
+            DB.athletes = DB.athletes.filter(a => !isCorrupt(a));
+            broadcastLocalUpdate();
+            await flushPendingAthleteChanges({ silent: true });
+            showToast(`Đã dọn dẹp ${corrupts.length} VĐV bị lỗi. Bạn có thể import lại file CSV ngay!`, 'success');
+            renderApp();
+        }
+
         function renderAthletesCardsHtml() {
-            const list = DB.athletes.filter(a => a.name.toLowerCase().includes(UIState.athleteSearch.toLowerCase()) || (a.club || '').toLowerCase().includes(UIState.athleteSearch.toLowerCase()) || (a.phone || '').includes(UIState.athleteSearch));
+            const list = DB.athletes.filter(a => a.name.toLowerCase().includes(UIState.athleteSearch.toLowerCase()) || (a.club || '').toLowerCase().includes(UIState.athleteSearch.toLowerCase()) || (a.phone || '').includes(UIState.athleteSearch) || (a.mssv || '').toLowerCase().includes(UIState.athleteSearch.toLowerCase()));
             if (list.length === 0) {
                 return `<div class="col-span-3 py-10 text-center text-neutral-500 text-xs">Không tìm thấy vận động viên phù hợp.</div>`;
             }
@@ -2799,7 +2868,11 @@
                 <div class="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-between">
                     <div>
                         <div class="text-sm font-extrabold text-white">${escapeHtml(a.name)}</div>
-                        <div class="text-xs text-neutral-400">${escapeHtml(a.club || 'Tự do')} • ${escapeHtml(a.phone || 'Chưa có SĐT')}</div>
+                        <div class="text-xs text-neutral-400 mt-1">
+                            <span class="text-rose-300 font-semibold">${escapeHtml(a.club || 'Tự do')}</span>
+                            ${a.phone ? ` • <span class="font-mono text-neutral-300">${escapeHtml(a.phone)}</span>` : ''}
+                            ${a.mssv ? ` • <span class="text-neutral-400">MSSV: <strong class="text-neutral-200">${escapeHtml(a.mssv)}</strong></span>` : ''}
+                        </div>
                     </div>
                     <button type="button" onclick="deleteAthlete('${a.id}')" class="px-2.5 py-1.5 rounded-lg bg-rose-950 text-rose-300 text-xs font-bold">Xóa</button>
                 </div>
@@ -2807,10 +2880,21 @@
         }
 
         function renderAthletesView() {
+            const isCorrupt = a => isDateOrTimestamp(a.name) || a.name.includes('Ã') || a.name.includes('Ä') || a.name.includes('»') || a.name.includes('Æ');
+            const corruptCount = DB.athletes.filter(isCorrupt).length;
+
             return `
                 <div class="space-y-4">
+                    ${corruptCount > 0 ? `
+                        <div class="p-3 bg-red-950/80 border border-red-700 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                            <div class="text-red-200 font-medium">
+                                ⚠️ Phát hiện <strong>${corruptCount} VĐV</strong> bị lỗi định dạng tên ngày tháng / lỗi font từ lần import trước.
+                            </div>
+                            <button type="button" onclick="cleanCorruptAthletes()" class="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold">🧹 Xóa nhanh ${corruptCount} VĐV lỗi này</button>
+                        </div>
+                    ` : ''}
                     <div class="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-                        <input type="text" id="athlete-search-input" value="${escapeHtml(UIState.athleteSearch)}" oninput="setAthleteSearch(this.value)" placeholder="🔍 Tìm kiếm VĐV theo tên, SĐT, CLB..." class="w-80 px-3 py-2 bg-neutral-950 border border-neutral-700 rounded-xl text-xs text-white">
+                        <input type="text" id="athlete-search-input" value="${escapeHtml(UIState.athleteSearch)}" oninput="setAthleteSearch(this.value)" placeholder="🔍 Tìm kiếm VĐV theo tên, SĐT, CLB, MSSV..." class="w-80 px-3 py-2 bg-neutral-950 border border-neutral-700 rounded-xl text-xs text-white">
                         <div class="flex items-center gap-2">
                             <button type="button" onclick="confirmDeleteAllAthletes()" class="px-4 py-2 rounded-xl bg-rose-950 text-rose-200 text-xs font-bold">🗑️ Xóa tất cả</button>
                             <button type="button" onclick="openCreateAthleteModal()" class="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold">+ Thêm VĐV / Import CSV</button>
@@ -2901,7 +2985,7 @@
             openAssignMatchModal, openAssignMatchModalForCategory, handleAssignMatchToCourt, unassignMatchFromCourt, addPoint, undoPoint,
             manualSetServer, chooseDoublesServer, forceEndSet, forceEndMatch,
             openCreateGroupModal, handleGroupCategoryChange, handleTeamCountChange, handleCreateGroupSubmit, filterGroupAthletes, chooseGroupAthlete, importGroupsFromExcel, downloadGroupImportTemplate, generatePlayoffBracket, updateQualifiersPerGroup, requestDeletePlayoffBracket, executeDeletePlayoffBracket, deleteGroup,
-            openCreateAthleteModal, handleAthletesImport, handleCreateAthleteSubmit, deleteAthlete, downloadAthleteImportTemplate,
+            openCreateAthleteModal, handleAthletesImport, handleCreateAthleteSubmit, deleteAthlete, downloadAthleteImportTemplate, cleanCorruptAthletes,
             confirmDeleteAllAthletes, executeDeleteAllAthletes, confirmClearAllMatches, executeClearAllMatches, openCreateCategoryModal,
             handleCreateCategorySubmit, deleteCategory, openCreateRefereeModal, handleCreateRefereeSubmit, deleteUser,
             openCloudSettingsModal, handleConnectCloudSubmit, retryCloudConnection
